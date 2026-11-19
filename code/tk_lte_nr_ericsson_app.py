@@ -41,6 +41,11 @@ APP_TITLE = f"OTLKM - LTE to NR Audit (Ericsson) - {APP_VERSION}"
 APP_SUBTITLE = "ENM | Audit X2 TermPoint LTE to 5G | Audit Neighbor Relation LTE to 5G (fans + tiers)"
 CODE_DIR = Path(__file__).resolve().parent
 
+# Evaluation license: the application runs while today's date is before EXPIRY_DATE
+EXPIRY_DATE = date(2027, 5, 19)
+EXPIRY_LABEL = f"Evaluation - Expires {EXPIRY_DATE.day} {EXPIRY_DATE:%B %Y}"
+EXPIRED_MESSAGE = "Por favor contactar a Soporte OTLKM"
+
 UI_FONT = "Segoe UI"
 C_BG, C_WHITE, C_BORDER = "#f2f4f7", "#ffffff", "#d3d9e1"
 C_TEXT, C_MUTED = "#1f2328", "#6b7280"
@@ -497,6 +502,7 @@ class App:
         link.pack(side=tk.RIGHT)
         link.bind("<Button-1>", lambda _e: self.nb.select(self.nb.index("end") - 1))
         ttk.Label(header, text=APP_VERSION, style="HeaderLink.TLabel").pack(side=tk.RIGHT, padx=(0, 24))
+        ttk.Label(header, text=EXPIRY_LABEL, style="HeaderLink.TLabel").pack(side=tk.RIGHT, padx=(0, 24))
         ttk.Frame(self.root, style="HeaderLine.TFrame", height=2).pack(side=tk.TOP, fill=tk.X)
 
         status = ttk.Frame(self.root, style="Status.TFrame", padding=(10, 4))
@@ -1265,6 +1271,11 @@ def main():
         root.iconbitmap(default=str(CODE_DIR / "icon" / "app.ico"))     # every window, popups included
     except tk.TclError:
         pass
+    if date.today() >= EXPIRY_DATE:
+        root.withdraw()
+        messagebox.showerror(APP_TITLE, EXPIRED_MESSAGE)
+        root.destroy()
+        return
     App(root)
     root.mainloop()
 
