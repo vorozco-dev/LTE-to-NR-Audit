@@ -32,7 +32,7 @@ import lne_report
 from lne_config import LOG_DIR, OUTPUT_ROOT, Settings
 from lne_geo_inputs import Ept, Propagation
 
-VERSION = "2.1"
+VERSION = "2.1.0"
 
 
 def scope_found(inv, settings):

@@ -22,3 +22,9 @@ db/
 
 # GUI session logs
 log/
+
+# Installer build (PyInstaller / WiX)
+build/
+dist/
+build_tools/dist_onedir/
+*.msi

@@ -33,7 +33,7 @@ import lne_db
 import lne_fanview
 import lne_load
 import lne_report
-from lne_config import DB_PATH, INPUT_DIR, LOG_DIR, LTE_BANDS, NR_BANDS, OUTPUT_ROOT, Settings
+from lne_config import DB_PATH, INPUT_DIR, LOG_DIR, LTE_BANDS, NR_BANDS, OUTPUT_ROOT, ROOT, Settings
 from lne_run import VERSION, run
 
 APP_VERSION = f"v{VERSION}"
@@ -605,7 +605,9 @@ class App:
         t.configure(state="disabled")
 
     def search_input(self):
-        p = filedialog.askdirectory(initialdir=self.input_dir.get() or str(CODE_DIR), title="Input folder")
+        current = self.input_dir.get().strip()
+        start = current if current and os.path.isdir(current) else str(ROOT)
+        p = filedialog.askdirectory(initialdir=start, title="Input folder")
         if p:
             self.input_dir.set(os.path.normpath(p))
             self.load_files()
