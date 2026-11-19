@@ -1,0 +1,24 @@
+# Virtual environments
+.venv/
+venv/
+
+# Data folders (ENM exports, EPT, run outputs: large and internal)
+input/
+output/
+
+# Local settings (paths of this machine)
+code/.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Office lock files, local backups
+~$*
+*.rar
+
+# SQLite database of the last Process
+db/
+
+# GUI session logs
+log/

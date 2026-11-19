@@ -1,0 +1,6 @@
+pandas
+openpyxl
+numpy
+scipy
+shapely>=2.0
+pyproj
