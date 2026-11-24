@@ -2,13 +2,13 @@
 Load Data step (GUI tab 1): check an input folder and process it into the work directory.
 
     scan(folder)                    -> Scan: what is in the folder, what is missing (no parsing)
-    process(scan, workdir, db)      -> the rows of <workdir> in db/lte_nr.sqlite: ENM tables of every ENM,
+    process(scan, workdir, db)      -> the rows of <workdir> in db/lte_nr_e.sqlite: ENM tables of every ENM,
                                        ept (EPT.xlsx converted, or reused when unchanged), propagation e4g/e5g
 
 Expected input folder (one on-demand extraction):
     EPT.xlsx                                         (or any *EPT*.xlsx)
     propagation tables e4g + e5g                     zip (propagation_tables_*.zip) or csv
-    <table>_<enm>.txt for tul, ptl, tlt              loose or inside zip / rar / 7z
+    <table>_<enm>.txt for tul, ptl, tlt              loose or inside result_enm_<enm>.zip (or rar / 7z)
 """
 
 import json
@@ -101,7 +101,7 @@ def scan(folder, log=print):
         arch = sorted({sources[b][0].name for files in found.values() for b in files if sources[b][0]})
         where = f" (in {', '.join(arch)})" if arch else ""
         if not any(found.values()):
-            say(f"ENM {enm}: no files <table>_{enm}.txt")
+            say(f"ENM {enm}: no files <table>_{enm}.txt (loose or in result_enm_{enm}.zip)")
         else:
             say(f"ENM {enm}: {n_ok}/{n_req} required tables{where}")
             for mo, req in lne_enm.MO_FILES.items():

@@ -1,5 +1,5 @@
 """
-OpenStreetMap background for the Neighbor Fan map (same approach as the Propagation Vector tool).
+OpenStreetMap background for the Graphical Audit map (same approach as the Propagation Vector tool).
 
 Tiles come from tile.openstreetmap.org only when there is internet access and are cached in
 <ROOT>/db/tiles, so an area already seen is drawn again without downloading. When the tiles
