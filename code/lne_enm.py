@@ -15,7 +15,8 @@ kept and the file is flagged as incomplete.
 
 Files are found as <MO>_<enm>.txt (plus <MO>_<enm>_<anything>.txt, e.g. a re-extraction
 TermPointToGNB_tul_fix.txt, merged with the main file) either loose in the input folder
-or inside any .zip / .rar / .7z archive of that folder (e.g. result_tul.zip). Archives
+or inside a .zip / .rar / .7z archive named result_enm_<enm>.zip (e.g. result_enm_tul.zip;
+the result_enm_ prefix keeps them apart from Nokia NetAct result_netact_NN.zip). Archives
 are read in memory: zip with Python, the others with the Windows tar (bsdtar/libarchive)
 or 7-Zip when installed. A loose file wins over an archive member with the same name.
 """
@@ -50,6 +51,30 @@ MO_FILES = {
     "SctpEndpoint": True,
     "AddressIPv4": True,
 }
+
+# ENM CLI attributes read per MO (doc/enm_cli_extraction.md section 3): cmedit get * <MO>.(<attrs>) -t
+CLI_ATTRS = {
+    "EUtranCellFDD": "earfcndl,freqBand,cellId,physicalLayerCellId,tac,administrativeState,operationalState",
+    "GUtranCellRelation": "neighborCellRef,isRemoveAllowed,isEndcAllowed,isHoAllowed,isVoiceHoAllowed,"
+                          "coverageIndicator,createdBy,mobilityStatusNR,essEnabled,reservedBy,timeOfCreation",
+    "GUtranFreqRelation": "gUtranSyncSignalFrequencyRef,cellReselectionPriority",
+    "GUtranSyncSignalFrequency": "arfcn,band,smtcPeriodicity,smtcOffset,smtcDuration",
+    "ExternalGNodeBFunction": "gNodeBId,gNodeBIdLength,gNodeBPlmnId,createdBy,timeOfCreation",
+    "ExternalGUtranCell": "localCellId,nRPCI,nRTAC,configuredTAC,gUtranSyncSignalFrequencyRef,bandList,"
+                          "cellState,serviceStatus,isRemoveAllowed,createdBy,reservedBy",
+    "TermPointToGNB": "ipAddress,usedIpAddress,ipv6Address,upIpAddress,domainName,administrativeState,"
+                      "operationalState,availabilityStatus,createdBy,timeOfCreation",
+    "NRCellDU": "nCI,cellLocalId,nRPCI,nRTAC,configuredEpsTAC,ssbFrequency,ssbSubCarrierSpacing,bandList,"
+                "administrativeState,operationalState,cellState,serviceState",
+    "GNBCUCPFunction": "gNBId,gNBIdLength,pLMNId",
+    "LocalSctpEndpoint": "interfaceUsed,sctpEndpointRef",
+    "SctpEndpoint": "localIpAddress,portNumber",
+    "AddressIPv4": "address",
+}
+
+
+def cli_command(mo):
+    return f"cmedit get * {mo}.({CLI_ATTRS[mo]}) -t"
 
 
 @dataclass
@@ -156,6 +181,13 @@ def parse_file(path):
 # --- locating the exports: loose files and archive members ---------------------------------
 
 ARCHIVE_EXTS = (".zip", ".rar", ".7z", ".tar", ".tgz", ".tar.gz")
+# Ericsson ENM archives are named result_enm_<enm>.zip (also result_enm_<enm>_<anything>.zip);
+# other archives (e.g. Nokia NetAct result_netact_01.zip, propagation tables) are not opened.
+ARCHIVE_PREFIX = "result_enm_"
+
+
+def archive_pattern(enm):
+    return re.compile(rf"^{ARCHIVE_PREFIX}{re.escape(enm)}(_[^.]+)?\.", re.I)
 
 
 def _bsdtar():
@@ -210,9 +242,10 @@ def find_sources(folder, enm):
     if not folder.is_dir():
         return found
     pat = re.compile(rf"_{re.escape(enm)}(_.+)?\.txt$", re.I)
+    arch_pat = archive_pattern(enm)
     for p in sorted(folder.iterdir()):
         name = p.name.lower()
-        if p.is_file() and name.endswith(ARCHIVE_EXTS):
+        if p.is_file() and name.endswith(ARCHIVE_EXTS) and arch_pat.match(p.name):
             key = (str(p), p.stat().st_mtime_ns)
             if key not in _ARCHIVE_CACHE:
                 _ARCHIVE_CACHE[key] = archive_members(p)

@@ -34,9 +34,9 @@ Los ENIQ (ENIQ23, ENIQ61, ENIQ57) no se usan.
 | 2 | `GUtranCellRelation` | `cmedit get * GUtranCellRelation.(neighborCellRef,isRemoveAllowed,isEndcAllowed,isHoAllowed,isVoiceHoAllowed,coverageIndicator,createdBy,mobilityStatusNR,essEnabled,reservedBy,timeOfCreation) -t` |
 | 3 | `GUtranFreqRelation` | `cmedit get * GUtranFreqRelation.(gUtranSyncSignalFrequencyRef,cellReselectionPriority) -t` |
 | 4 | `GUtranSyncSignalFrequency` | `cmedit get * GUtranSyncSignalFrequency.(arfcn,band,smtcPeriodicity,smtcOffset,smtcDuration) -t` |
-| 5 | `ExternalGNodeBFunction` | `cmedit get * ExternalGNodeBFunction.(gNodeBId,gNodeBIdLength,gNodeBPlmnId,createdBy) -t` |
+| 5 | `ExternalGNodeBFunction` | `cmedit get * ExternalGNodeBFunction.(gNodeBId,gNodeBIdLength,gNodeBPlmnId,createdBy,timeOfCreation) -t` |
 | 6 | `ExternalGUtranCell` | `cmedit get * ExternalGUtranCell.(localCellId,nRPCI,nRTAC,configuredTAC,gUtranSyncSignalFrequencyRef,bandList,cellState,serviceStatus,isRemoveAllowed,createdBy,reservedBy) -t` |
-| 7 | `TermPointToGNB` | `cmedit get * TermPointToGNB.(ipAddress,usedIpAddress,ipv6Address,domainName,administrativeState,operationalState,availabilityStatus,createdBy) -t` |
+| 7 | `TermPointToGNB` | `cmedit get * TermPointToGNB.(ipAddress,usedIpAddress,ipv6Address,upIpAddress,domainName,administrativeState,operationalState,availabilityStatus,createdBy,timeOfCreation) -t` |
 | 8 | `NRCellDU` | `cmedit get * NRCellDU.(nCI,cellLocalId,nRPCI,nRTAC,configuredEpsTAC,ssbFrequency,ssbSubCarrierSpacing,bandList,administrativeState,operationalState,cellState,serviceState) -t` |
 | 9 | `GNBCUCPFunction` | `cmedit get * GNBCUCPFunction.(gNBId,gNBIdLength,pLMNId) -t` |
 | 10 | `LocalSctpEndpoint` | `cmedit get * LocalSctpEndpoint.(interfaceUsed,sctpEndpointRef) -t` |
@@ -50,9 +50,9 @@ cmedit get * EUtranCellFDD.(earfcndl,freqBand,cellId,physicalLayerCellId,tac,adm
 cmedit get * GUtranCellRelation.(neighborCellRef,isRemoveAllowed,isEndcAllowed,isHoAllowed,isVoiceHoAllowed,coverageIndicator,createdBy,mobilityStatusNR,essEnabled,reservedBy,timeOfCreation) -t
 cmedit get * GUtranFreqRelation.(gUtranSyncSignalFrequencyRef,cellReselectionPriority) -t
 cmedit get * GUtranSyncSignalFrequency.(arfcn,band,smtcPeriodicity,smtcOffset,smtcDuration) -t
-cmedit get * ExternalGNodeBFunction.(gNodeBId,gNodeBIdLength,gNodeBPlmnId,createdBy) -t
+cmedit get * ExternalGNodeBFunction.(gNodeBId,gNodeBIdLength,gNodeBPlmnId,createdBy,timeOfCreation) -t
 cmedit get * ExternalGUtranCell.(localCellId,nRPCI,nRTAC,configuredTAC,gUtranSyncSignalFrequencyRef,bandList,cellState,serviceStatus,isRemoveAllowed,createdBy,reservedBy) -t
-cmedit get * TermPointToGNB.(ipAddress,usedIpAddress,ipv6Address,domainName,administrativeState,operationalState,availabilityStatus,createdBy) -t
+cmedit get * TermPointToGNB.(ipAddress,usedIpAddress,ipv6Address,upIpAddress,domainName,administrativeState,operationalState,availabilityStatus,createdBy,timeOfCreation) -t
 cmedit get * NRCellDU.(nCI,cellLocalId,nRPCI,nRTAC,configuredEpsTAC,ssbFrequency,ssbSubCarrierSpacing,bandList,administrativeState,operationalState,cellState,serviceState) -t
 cmedit get * GNBCUCPFunction.(gNBId,gNBIdLength,pLMNId) -t
 cmedit get * LocalSctpEndpoint.(interfaceUsed,sctpEndpointRef) -t
@@ -61,7 +61,7 @@ cmedit get * AddressIPv4.(address) -t
 ```
 
 Notas:
-- En `ExternalGNodeBFunction` y `TermPointToGNB` no se piden `timeOfCreation` ni `upIpAddress`: con ellos algunos nodos de software más antiguo devolvieron `Error 5010`.
+- `timeOfCreation` (en `ExternalGNodeBFunction` y `TermPointToGNB`) y `upIpAddress` (en `TermPointToGNB`) pueden dar `Error 5010` en nodos de software más antiguo. La herramienta usa igual el archivo y marca esos nodos como INCOMPLETE; se pueden re-extraer sin esos atributos como `<tabla>_<enm>_fix.txt`.
 - Si un atributo no existe en la versión de nodo (`Error 1010 ... unknown attribute`), quitarlo del comando y avisar; se valida con AMOS (`get <MO>`).
 
 ## 4. Regla de nombrado
@@ -82,6 +82,15 @@ TermPointToGNB_tul.txt     TermPointToGNB_ptl.txt     TermPointToGNB_tlt.txt
 ```
 
 Total esperado por extracción completa: 13 archivos × 3 ENM = **39 archivos**.
+
+**Empaquetado:** los archivos de cada ENM se entregan en un zip llamado `result_enm_<enm>.zip`:
+
+```
+result_enm_tul.zip   result_enm_ptl.zip   result_enm_tlt.zip
+```
+
+El prefijo `result_enm_` identifica las extracciones de Ericsson; la herramienta solo abre esos zips
+e ignora cualquier otro (por ejemplo los de Nokia NetAct, `result_netact_01.zip`).
 
 **Re-extracción parcial:** si un comando falla para algunos nodos, se puede repetir solo para ellos
 (`cmedit get NODO1;NODO2 <MO>.(...) -t`) y guardarlo como `<tabla>_<enm>_fix.txt`

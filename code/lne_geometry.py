@@ -16,7 +16,7 @@ import math
 import numpy as np
 from pyproj import Transformer
 from scipy.spatial import Delaunay
-from shapely.geometry import LineString, Point, Polygon, mapping
+from shapely.geometry import Point, Polygon
 from shapely.ops import transform as shp_transform
 
 
@@ -46,17 +46,6 @@ def fan(x, y, azimuth, beam, radius, step=2.0):
         pts.append((x + radius * math.sin(a), y + radius * math.cos(a)))
     pts.append((x, y))
     return Polygon(pts)
-
-
-def relation_line(a, b):
-    """Line between two cell positions; a tiny loop when co-located so it stays visible."""
-    if abs(a[0] - b[0]) < 0.5 and abs(a[1] - b[1]) < 0.5:
-        return LineString([a, (a[0] + 15, a[1] + 20), (a[0] - 15, a[1] + 20), a])
-    return LineString([a, b])
-
-
-def feature(geom, props):
-    return {"type": "Feature", "geometry": mapping(geom), "properties": props}
 
 
 class SiteTopology:
