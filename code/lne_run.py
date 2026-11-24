@@ -1,7 +1,7 @@
 """
 Run the LTE to NR Audit (Ericsson) (console). The GUI (tk_lte_nr_ericsson_app.py) calls run() too.
 
-    py -3.13 lne_load.py --workdir 2026-11-18 # Process: input folder -> rows of the workdir in db/lte_nr.sqlite
+    py -3.13 lne_load.py --workdir 2026-11-18 # Process: input folder -> rows of the workdir in db/lte_nr_e.sqlite
     py -3.13 lne_run.py                       # both parts, every ENM of the last workdir loaded
     py -3.13 lne_run.py --workdir 2026-11-18 --part 1
     py -3.13 lne_run.py --scope nodes --names DIFVEN1271,MEXECA1067
@@ -9,7 +9,7 @@ Run the LTE to NR Audit (Ericsson) (console). The GUI (tk_lte_nr_ericsson_app.py
 Output: output/<workdir>/<ENM>_<YYYYMMDD>/ (one folder per ENM and day; every file has its own time)
     01_lte_nr_termpoint_audit_<ENM>_<YYYYMMDD>_<HHMMSS>.xlsx
     01_lte_nr_termpoint_create_mop_cmedit_..., 01_lte_nr_termpoint_create_rollback_cmedit_...   STEP 1
-    02_lte_nr_relation_audit_<ENM>_<YYYYMMDD>_<HHMMSS>.xlsx / .kmz
+    02_lte_nr_relation_audit_<ENM>_<YYYYMMDD>_<HHMMSS>.xlsx   (the map of a site: GUI 3. Graphical Audit)
     02_lte_nr_relation_add_mop_cmedit_...,     02_lte_nr_relation_add_rollback_cmedit_...       STEP 2
     02_lte_nr_relation_delete_mop_cmedit_...,  02_lte_nr_relation_delete_rollback_cmedit_...    STEP 3
     01_lte_nr_termpoint_delete_mop_cmedit_..., 01_lte_nr_termpoint_delete_rollback_cmedit_...   STEP 4
@@ -32,7 +32,7 @@ import lne_report
 from lne_config import LOG_DIR, OUTPUT_ROOT, Settings
 from lne_geo_inputs import Ept, Propagation
 
-VERSION = "2.1.0"
+VERSION = "2.5"
 
 
 def scope_found(inv, settings):
@@ -163,7 +163,7 @@ def run(settings, log=print):
             say("  Audit Neighbor Relation LTE to 5G: no source cells in the scope (no NR on the node or no "
                 "cell of the LTE source bands) -> 02_lte_nr_relation_audit not written")
         elif settings.part2:
-            sheets, geo, totals = part2
+            sheets, _lines, totals = part2
             summary = pd.DataFrame([
                 {"Item": "Source cells audited", "Value": totals["sources"]},
                 {"Item": "ADD proposals", "Value": totals["add"]},
@@ -177,8 +177,6 @@ def run(settings, log=print):
             write_mop("02_lte_nr_relation_add", lne_mop.relation_add(inv, sheets["ADD relation"], settings.enm))
             write_mop("02_lte_nr_relation_delete", lne_mop.relation_delete(
                 inv, sheets["DELETE relation"], totals["tp_audit"], settings.enm))
-            lne_report.write_kmz(res.path("02_lte_nr_relation_audit", "kmz"), geo,
-                                f"LTE to NR relation audit {settings.enm} {wd}")
 
         if tp is not None:
             write_mop("01_lte_nr_termpoint_delete", lne_mop.termpoint_delete(inv, tp, settings.enm))
@@ -200,7 +198,7 @@ def main():
     p = argparse.ArgumentParser(description="LTE to NR Audit (Ericsson) (reads the database written by lne_load.py / Process)")
     p.add_argument("--part", choices=["1", "2", "both"], default="both")
     p.add_argument("--enm", help="one ENM; default every ENM loaded in the database")
-    p.add_argument("--db", help="database (default db/lte_nr.sqlite)")
+    p.add_argument("--db", help="database (default db/lte_nr_e.sqlite)")
     p.add_argument("--workdir", help="workdir loaded by Process (default the last one loaded); "
                                      "output goes to output/<workdir>")
     p.add_argument("--scope", choices=["all", "nodes"])
@@ -212,10 +210,13 @@ def main():
     p.add_argument("--delete-tier", type=int, help="any neighbor is deleted from this tier up")
     p.add_argument("--add-all-tier", type=int, help="every missing NR cell (overlap or not) is added up to this tier")
     p.add_argument("--add-tier", type=int, help="missing NR cells with fan overlap are added up to this tier")
+    p.add_argument("--max-site-km", type=float, help="no ADD towards a site farther than this, an existing "
+                                                     "relation to it is deleted (default 30)")
     a = p.parse_args()
     s = Settings()
     for attr, val in (("zero_overlap_min_tier", a.zero_overlap_tier), ("min_delete_tier", a.delete_tier),
-                      ("max_add_tier", a.add_tier), ("max_add_all_tier", a.add_all_tier)):
+                      ("max_add_tier", a.add_tier), ("max_add_all_tier", a.add_all_tier),
+                      ("max_site_km", a.max_site_km)):
         if val is not None:
             setattr(s, attr, val)
     if s.rule_problems():

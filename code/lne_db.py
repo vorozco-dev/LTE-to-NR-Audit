@@ -1,5 +1,5 @@
 """
-SQLite database of the on-demand extractions (db/lte_nr.sqlite). Every Process loads one input
+SQLite database of the on-demand extractions (db/lte_nr_e.sqlite). Every Process loads one input
 folder under a workdir name; the first column of every data table is `workdir`, so several
 extractions live side by side. Processing a workdir again replaces only its rows.
 
@@ -257,6 +257,23 @@ def read_tables(path, workdir, enm, mos=None, log=print):
     if missing:
         raise FileNotFoundError(f"ENM {enm}: required tables not loaded: {', '.join(missing)}")
     return out
+
+
+def node_enms(path, workdir):
+    """{NodeId: enm} of the LTE nodes (EUtranCellFDD) of a workdir."""
+    with _open(path) as conn:
+        if "EUtranCellFDD" not in _tables_in(conn):
+            return {}
+        return dict(conn.execute('SELECT DISTINCT NodeId, enm FROM "EUtranCellFDD" WHERE workdir=?',
+                                 (workdir,)).fetchall())
+
+
+def nr_nodes(path, workdir):
+    """NodeIds with NR cells (NRCellDU) in any ENM of a workdir."""
+    with _open(path) as conn:
+        if "NRCellDU" not in _tables_in(conn):
+            return set()
+        return {r[0] for r in conn.execute('SELECT DISTINCT NodeId FROM "NRCellDU" WHERE workdir=?', (workdir,))}
 
 
 def read_frame(path, name, workdir, enm=None):

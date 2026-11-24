@@ -15,13 +15,17 @@ Actions on an existing relation
   DELETE      tier >= settings.min_delete_tier, or zero fan overlap at tier >=
               settings.zero_overlap_min_tier (same site / first ring are never deleted for overlap)
   PROTECTED   would be DELETE but the relation is reserved (reservedBy, e.g. ESS sharing group)
-  KEEP        overlap > 0 and tier below the delete threshold
+  KEEP        tier below settings.min_delete_tier and either fan overlap > 0 or tier below
+              settings.zero_overlap_min_tier (kept with or without overlap)
   REVIEW      overlap or tier unknown (missing geometry/propagation) — unknown is not zero
 Actions on a missing pair (no relation)
   ADD         tier <= settings.max_add_all_tier (every NR cell of those sites, overlap or not), or
               overlap > 0 and tier <= settings.max_add_tier (geometries reliable: EXACT/SECTOR);
               source/target active (option) and source node data complete
   HOLD        would be ADD but one of those conditions is not met (reason given)
+Last rule, after the tier rules: Max Site distance (settings.max_site_km, km between the EPT
+site positions). A relation to a site farther than it is DELETE (PROTECTED if reserved) and a
+missing one is not proposed (no ADD / HOLD).
 ADD rows are sorted by tier (0 first). Nothing is executed.
 
 X2 TermPoints (decided here, reported and written as commands by the TermPoint audit, lne_part1),
@@ -32,6 +36,7 @@ one per eNB node -> gNB
               PROTECTED included) goes to that gNB, and tier >= settings.min_delete_tier, or no fan of
               the eNB overlaps a fan of the gNB at tier >= settings.zero_overlap_min_tier. Its
               ExternalGUtranCells are deleted here (02), the TermPoint and ExternalGNodeBFunction in 01.
+              Also DELETE when no relation is left and the gNB site is beyond Max Site distance.
   KEEP        relations remain, or the fans overlap / the tier is below the thresholds
   REVIEW      no relation left but tier or overlap unknown
 """
@@ -41,7 +46,7 @@ import collections
 import pandas as pd
 from shapely import STRtree
 
-from lne_geometry import Projector, SiteTopology, fan, feature, relation_line
+from lne_geometry import Projector, SiteTopology, fan
 from lne_ids import missing, parse_gnb, site_code
 from lne_inventory import fdn
 
@@ -66,7 +71,8 @@ class _Cells:
         radius = self.prop.radius_m(tech, cell)
         if radius is None and ept_rec is not None:
             radius = self.prop.radius_m(tech, ept_rec["cell_name"])
-        g = dict(geo, radius=radius, xy=None, fan=None, area=None, fan_issue="")
+        g = dict(geo, radius=radius, xy=None, fan=None, area=None, fan_issue="",
+                 site=site_code(node) or site_code(cell))
         if geo["lat"] is not None:
             g["xy"] = self.proj.xy(geo["lat"], geo["lon"])
         if geo["quality"] == "NONE":
@@ -82,7 +88,9 @@ class _Cells:
         return g
 
 
-def audit(inv, ept, prop, settings, log=print):
+def audit(inv, ept, prop, settings, log=print, want_lines=False):
+    """(sheets, lines, totals) or None when no source cell is in the scope. lines (only with
+    want_lines, for the Graphical Audit map): one dict per relation, see _add_line."""
     log("Audit Neighbor Relation LTE to 5G")
     s = settings
     nr = inv.nr_cells[inv.nr_cells["band"].isin(s.target_bands)].copy()
@@ -128,6 +136,22 @@ def audit(inv, ept, prop, settings, log=print):
 
     def tier(src_node, tgt_node):
         return topo.tier(site_code(src_node), site_code(tgt_node))
+
+    site_xy_all = {}
+
+    def site_km(src_node, tgt_node):
+        """km between the two sites (EPT site positions), None when one is not in the EPT. The
+        'Max Site distance' rule is applied with it after the tier rules."""
+        out = []
+        for n in (src_node, tgt_node):
+            sc = site_code(n)
+            if sc not in site_xy_all:
+                site_xy_all[sc] = proj.xy(*ept.by_site[sc]) if sc in ept.by_site else None
+            out.append(site_xy_all[sc])
+        if None in out:
+            return None
+        (x1, y1), (x2, y2) = out
+        return round(((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 / 1000, 2)
 
     # NR target fans of this ENM (spatial index for missing-neighbor candidates)
     nr_recs = nr.to_dict("records")
@@ -176,7 +200,7 @@ def audit(inv, ept, prop, settings, log=print):
         existing[(r["node"], r["cell"])].append((r, target))
 
     current, adds, review = [], [], []
-    lines = {"current": [], "add": [], "delete": []}
+    lines = []                                   # Graphical Audit relations (only with want_lines)
     summary_rows = []
     tp_on = True                                 # X2 TermPoints are always audited with the relations
     tps = _TermPoints(inv) if tp_on else None
@@ -208,16 +232,19 @@ def audit(inv, ept, prop, settings, log=print):
             tg = cells.get("NR", t["node"], t["cell"], t["ept"])
             have.add(t["cell"].upper())
             rec = _pair(src, sg, t, tg, tier(node, t["node"]), s, relation=r)
+            rec["Site distance km"] = site_km(node, t["node"])
             rec["Action"], rec["Reason"] = _classify_existing(rec, r, s)
             rec["Relation FDN"] = fdn(inv, node, f"ENodeBFunction=1,EUtranCellFDD={cell},"
                                                 f"GUtranFreqRelation={r['freq_rel']},"
                                                 f"GUtranCellRelation={r['relation_id']}")
             current.append(rec)
             counts[rec["Action"]] += 1
-            rel_act[(node, _relation_gnb(r))][rec["Action"]] += 1
-            _add_line(lines, "current", sg, tg, rec, proj)
-            if rec["Action"] == "DELETE":
-                _add_line(lines, "delete", sg, tg, rec, proj)
+            gnb = _relation_gnb(r)
+            rel_act[(node, gnb)][rec["Action"]] += 1
+            if want_lines:
+                has_tp = gnb is not None and (node, gnb) in tps.tp
+                kind = "delete" if rec["Action"] == "DELETE" else "complete" if has_tp else "missing_tp"
+                _add_line(lines, kind, src, sg, tg, rec, termpoint="YES" if has_tp else "NO")
         # candidates: NR fans overlapping the source fan, plus every NR cell of the sites within
         # 'ADD ... within tier' (overlap or not)
         candidates = {}
@@ -236,6 +263,7 @@ def audit(inv, ept, prop, settings, log=print):
             tg = nr_geo[i]
             tt = {"node": t["node"], "cell": t["cell"], "in_enm": True, "row": t, "ept": None}
             rec = _pair(src, sg, tt, tg, tier(node, t["node"]), s, overlap=inter)
+            rec["Site distance km"] = site_km(node, t["node"])
             rec["Action"], rec["Reason"] = _classify_missing(rec, src, t, sg, tg, node_status, s)
             if rec["Action"] is None:
                 continue
@@ -261,8 +289,8 @@ def audit(inv, ept, prop, settings, log=print):
             if rec["Action"] == "ADD" and not missing(t["gnb_id"]):
                 rel_act[(node, int(t["gnb_id"]))]["ADD"] += 1
             counts[rec["Action"]] += 1
-            if rec["Action"] == "ADD":
-                _add_line(lines, "add", sg, tg, rec, proj)
+            if rec["Action"] == "ADD" and want_lines:
+                _add_line(lines, "add", src, sg, tg, rec, termpoint=rec.get("TermPointToGNB", ""))
         summary_rows.append({"LTE node": node, "LTE cell": cell, "LTE band": src["band"], "Node data": node_status,
                              "Geometry": sg["quality"], "Fan": "OK" if sg["fan"] is not None else sg["fan_issue"],
                              "Current": len(existing.get((node, cell), [])),
@@ -287,23 +315,15 @@ def audit(inv, ept, prop, settings, log=print):
     }
     tp_audit, tp_add = pd.DataFrame(), pd.DataFrame()
     if tp_on:
-        tp_audit, tp_add = tps.audit(sources, cells, ept, tier, s, rel_act, add_to)
+        tp_audit, tp_add = tps.audit(sources, cells, ept, tier, s, rel_act, add_to, site_km)
         log(f"  TermPoints: ADD {len(tp_add):,}, " + (", ".join(
             f"{k} {v:,}" for k, v in tp_audit["Action"].value_counts().items()) if len(tp_audit) else "none audited"))
-    geo = {
-        "lte_fans": [feature(proj.to_wgs84(g["fan"]), {"cell": c, "radius_m": round(g["radius"]), "quality": g["quality"]})
-                     for (tech, c), g in cells.cache.items() if tech == "LTE" and g["fan"] is not None],
-        "nr_fans": [feature(proj.to_wgs84(g["fan"]), {"cell": c, "radius_m": round(g["radius"]), "quality": g["quality"]})
-                    for (tech, c), g in cells.cache.items() if tech == "NR" and g["fan"] is not None],
-        "current_relations": lines["current"], "missing_relations": lines["add"],
-        "delete_relations": lines["delete"],
-    }
     n_add, n_del = len(adds), int((cur["Action"] == "DELETE").sum()) if len(cur) else 0
     log(f"  Existing relations of the sources: {len(cur):,} resolved, {len(unresolved):,} unresolved")
     if len(cur):
         log("  Existing: " + ", ".join(f"{k} {v:,}" for k, v in cur["Action"].value_counts().items()))
     log(f"  Missing: ADD {n_add:,}, HOLD {len(review):,}")
-    return sheets, geo, {"sources": len(sources), "add": n_add, "delete": n_del, "tier": tier,
+    return sheets, lines, {"sources": len(sources), "add": n_add, "delete": n_del, "tier": tier,
                          "tp_audit": tp_audit, "tp_add": tp_add}
 
 
@@ -365,6 +385,9 @@ def _classify_existing(rec, r, s):
         reasons.append(f"zero fan overlap at tier {tier}")
     if tier is not None and tier >= s.min_delete_tier:
         reasons.append(f"tier {tier} >= {s.min_delete_tier}")
+    km = rec.get("Site distance km")
+    if km is not None and km > s.max_site_km:           # last rule: whatever the tier says
+        reasons.append(f"site distance {km:g} km > {s.max_site_km:g}")
     if reasons:
         if r["reserved_by"]:
             return "PROTECTED", "; ".join(reasons) + f" but reserved by {r['reserved_by']} (not deleted)"
@@ -372,7 +395,9 @@ def _classify_existing(rec, r, s):
     if area is None or tier is None:
         unknown = [x for x, v in (("overlap", area), ("tier", tier)) if v is None]
         return "REVIEW", "unknown " + " and ".join(unknown) + " (missing geometry, propagation or topology)"
-    return "KEEP", "overlap > 0 and tier below the delete threshold"
+    if area > 0:
+        return "KEEP", f"fan overlap; tier {tier} < {s.min_delete_tier}"
+    return "KEEP", f"no fan overlap but tier {tier} < {s.zero_overlap_min_tier} (kept with or without overlap)"
 
 
 def _classify_missing(rec, src, t, sg, tg, node_status, s):
@@ -381,6 +406,9 @@ def _classify_missing(rec, src, t, sg, tg, node_status, s):
     overlap = area is not None and area > 0
     if not near and not (overlap and (tier is None or tier <= s.max_add_tier)):
         return None, ""                       # not a candidate
+    km = rec.get("Site distance km")
+    if km is not None and km > s.max_site_km:
+        return None, ""                       # last rule: no ADD towards a site beyond 'Max Site distance'
     holds = []
     if tier is None:
         holds.append("tier unknown")
@@ -397,13 +425,15 @@ def _classify_missing(rec, src, t, sg, tg, node_status, s):
     return "ADD", f"missing relation; fans overlap; tier {tier} <= {s.max_add_tier}"
 
 
-def _add_line(lines, kind, sg, tg, rec, proj):
-    if sg["xy"] is None or tg["xy"] is None:
-        return
-    line = proj.to_wgs84(relation_line(sg["xy"], tg["xy"]))
-    lines[kind].append(feature(line, {"source": rec["LTE cell"], "target": rec["NR cell"], "tier": rec["Tier"],
-                                      "action": rec["Action"], "overlap_m2": rec["Overlap m2"],
-                                      "reason": rec["Reason"]}))
+def _add_line(lines, kind, src, sg, tg, rec, termpoint=""):
+    """One relation for the Graphical Audit map: positions of both cells (EPT), kind = key of
+    lne_colors.RELATION_LINES (complete / missing_tp / delete / add)."""
+    lines.append({"kind": kind, "LTE node": rec["LTE node"], "LTE cell": rec["LTE cell"], "LTE band": src["band"],
+                  "NR node": rec["NR node"], "NR cell": rec["NR cell"], "NR site": tg["site"],
+                  "Tier": rec["Tier"], "Action": rec["Action"], "TermPointToGNB": termpoint,
+                  "Site distance km": rec.get("Site distance km"), "Overlap m2": rec["Overlap m2"],
+                  "Reason": rec["Reason"],
+                  "lte_lat": sg["lat"], "lte_lon": sg["lon"], "nr_lat": tg["lat"], "nr_lon": tg["lon"]})
 
 
 class _IdConvention:
@@ -601,7 +631,7 @@ class _TermPoints:
         c["KEEP"] += max(self.rel_count[key] - audited, 0)
         return c
 
-    def audit(self, sources, cells, ept, tier, s, rel_act, add_to):
+    def audit(self, sources, cells, ept, tier, s, rel_act, add_to, site_km=None):
         """(every TermPoint of the scope with its action, TermPoint ADD proposals).
         All eNB nodes of the scope are audited, also the ones without source cells: their relations
         are not audited (none deleted), so only a TermPoint without relations can be deleted."""
@@ -632,6 +662,11 @@ class _TermPoints:
                 action = "KEEP"
             tier_part = tier_text(tr, s, ov)
             reason = f"{tier_part}, {rel}"
+            # last rule: a TermPoint without relations towards a site beyond 'Max Site distance' is deleted
+            km = site_km(node, info["node"]) if site_km and info and info["node"] else None
+            if km is not None and km > s.max_site_km and not (left > 0 or c["ADD"]) and action != "DELETE":
+                action = "DELETE"
+                reason += f"; site distance {km:g} km > {s.max_site_km:g}"
             ext_mo = f"ENodeBFunction=1,GUtraNetwork=1,ExternalGNodeBFunction={t['ext_gnb_ref']}"
             mo = f"{ext_mo},TermPointToGNB={t['termpoint_id']}"
             ext_cells = self.ext_cells_of.get((node, str(t["ext_gnb_ref"]).strip()), [])

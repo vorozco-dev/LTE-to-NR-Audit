@@ -6,7 +6,7 @@ Tabs:
                   propagation e4g/e5g, <table>_<enm>.txt); Process: EPT, propagation and every ENM export
                   parsed, checked and loaded into the database under the workdir name
   2. Run Audit    X2 TermPoint and Neighbor Relation audits (LTE to 5G) of a loaded workdir
-  3. Neighbor Fan one site: its LTE fans and the NR sites around it by tier (map, Excel, KMZ)
+  3. Graphical Audit  one site on a map: LTE fans, NR sites by tier and its relation audit (Excel, KMZ)
   4. DB Status    tables loaded per workdir; export to CSV, delete a workdir
   Instructions    how to use the application (last tab)
 Long tasks run in a worker thread; the log and status bar show progress.
@@ -30,9 +30,11 @@ from matplotlib.figure import Figure
 
 import lne_basemap
 import lne_db
+import lne_enm
 import lne_fanview
 import lne_load
 import lne_report
+import lne_siteaudit
 from lne_config import DB_PATH, INPUT_DIR, LOG_DIR, LTE_BANDS, NR_BANDS, OUTPUT_ROOT, ROOT, Settings
 from lne_run import VERSION, run
 
@@ -53,11 +55,30 @@ C_ACCENT, C_ACCENT_DARK, C_ACCENT_TEXT = "#0a8fd6", "#0872b0", "#1565c0"
 C_HOVER, C_STATUS = "#e6f2fb", "#1f1f1f"
 C_OK, C_WARN, C_ERR = "#e7f6ec", "#fff4d6", "#fde2e1"
 
+# Settings of the Audit Rules (listed in the Graphical Audit export)
+RULE_SETTINGS = ("source_bands", "target_bands", "active_only_for_add", "max_add_all_tier", "max_add_tier",
+                 "zero_overlap_min_tier", "min_delete_tier", "max_site_km")
+
 INSTRUCTIONS = [
     ("h1", "LTE to NR Audit (Ericsson) — User Guide\n"),
     ("p", "On-demand audit: the tool reads one extraction of the Ericsson ENM exports (cmedit), the EPT and the "
           "propagation tables (Max85) and produces two audits. Nothing is executed in the network: proposals are "
           "written to Excel and to text files with cmedit commands to review.\n"),
+    ("h2", "0. ENM Extraction (Ericsson CLI)\n"),
+    ("p", "Before 1. Load Data, extract the 12 tables from each of the 3 ENM (tul, ptl, tlt) on the same day: "
+          "the audit crosses data between them (neighbors and X2 towards gNBs of another ENM).\n"),
+    ("li", "•  In the ENM GUI open Command Line Interface and run each command below, one by one and on a "
+           "single line (a line cut when pasted gives Error 4004).\n"),
+    ("li", "•  Save the complete output as <table>_<enm>.txt (e.g. TermPointToGNB_tul.txt) without editing it: "
+           "the header and the footer N instance(s) (or Error NNNN) are used to check that the read is complete.\n"),
+    ("li", "•  Pack the 12 files of each ENM in result_enm_<enm>.zip (result_enm_tul.zip, result_enm_ptl.zip, "
+           "result_enm_tlt.zip). The result_enm_ prefix marks them as Ericsson; other zips, such as Nokia "
+           "NetAct result_netact_01.zip, are ignored.\n"),
+    ("li", "•  If a command fails for some nodes, repeat it only for them (cmedit get NODE1;NODE2 <MO>.(...) -t) "
+           "and save it as <table>_<enm>_fix.txt: it is merged with the main file.\n"),
+    ("p", "Commands (the same for the 3 ENM):\n"),
+    ("cmd", "".join(lne_enm.cli_command(mo) + "\n" for mo in lne_enm.CLI_ATTRS)),
+    ("p", "More detail (ENM IPs, error handling) in doc/enm_cli_extraction.md.\n"),
     ("h2", "1. Load Data\n"),
     ("p", "Workdir: every output goes to output\\<workdir>. Type only the workdir name before Process; it comes "
           "pre-filled with today's date (YYYY-MM-DD). Process and every run of 2. Run Audit write there.\n"),
@@ -65,9 +86,10 @@ INSTRUCTIONS = [
           "The panel lists the files and checks that the required ones are present:\n"),
     ("li2", "EPT.xlsx\n"
             "propagation tables e4g (LTE) and e5g (NR): propagation_tables_*.zip or the csv files\n"
-            "<table>_<enm>.txt for tul, ptl, tlt     e.g. TermPointToGNB_tul.txt (loose or in zip/rar)\n"
+            "result_enm_<enm>.zip for tul, ptl, tlt  e.g. result_enm_tul.zip with TermPointToGNB_tul.txt, ...\n"
+            "<table>_<enm>.txt                       the same files loose in the folder also work\n"
             "<table>_<enm>_fix.txt                   partial re-extraction, merged automatically\n"),
-    ("p", "The commands for the 12 tables are in doc/enm_cli_extraction.md. An ENM is ready when its required "
+    ("p", "The commands for the 12 tables are in section 0 above. An ENM is ready when its required "
           "tables are present. Then press Process:\n"),
     ("li", "•  EPT.xlsx -> table ept (a few minutes). Not converted again when a workdir of the database was "
            "already loaded from the same EPT.xlsx (same path, size and date): its ept rows are reused. "
@@ -76,7 +98,7 @@ INSTRUCTIONS = [
     ("li", "•  every ENM export is read and checked: rows read against the rows announced by ENM "
            "(N instance(s)). A file that ends with an ENM error is used, but the nodes it missed are marked "
            "INCOMPLETE and no change is proposed for them.\n"),
-    ("li", "•  everything is loaded into the database db\\lte_nr.sqlite under the workdir name (first column "
+    ("li", "•  everything is loaded into the database db\\lte_nr_e.sqlite under the workdir name (first column "
            "workdir of every table): the 13 ENM tables of tul, ptl and tlt (column enm), ept, propagation_e4g / "
            "propagation_e5g (cell_name, max85coverage_km), load_status and loads. Several workdirs (extractions) "
            "live side by side; processing a workdir again replaces only its rows. Each workdir takes about "
@@ -116,6 +138,12 @@ INSTRUCTIONS = [
            "tier <= the value of 'ADD ExtGNB, TermPoint, Relation (fan overlap)' (geometry from the EPT, not only the site position). Both "
            "need the cells UNLOCKED and ENABLED (option) and the node data complete; otherwise HOLD. Each ADD tier "
            "must be lower than the matching DELETE tier.\n"),
+    ("li", "•  Max Site distance (Km), editable (default 30), is applied last, after the tier rules: distance "
+           "between the two sites (EPT positions). A relation to a site farther than it is DELETE (PROTECTED if "
+           "reserved), a missing one is not added, and a TermPoint without relations to such a gNB is deleted. "
+           "Delaunay tiers have no length limit (on the edge of the network a tier-1 neighbor can be hundreds of "
+           "km away); this rule bounds them. In 3. Graphical Audit those sites are not drawn in the tiers. In "
+           "'What the audit will do' it shows under Tier (≤ 30 km): the table holds for sites within that distance.\n"),
     ("li", "•  'What the audit will do' (under Audit Rules) shows the action per tier with the selected values: "
            "Exists = the relation is defined (keep / delete), Missing = it is not (add / — = not added), each with "
            "and without fan overlap. It is updated when a tier changes and warns in red when a relation would be "
@@ -133,7 +161,7 @@ INSTRUCTIONS = [
           "of each report and the files it wrote; double-click a row to open that folder or file. Each ENM "
           "writes to output\\<workdir>\\<ENM>_<YYYYMMDD>\\ (one folder per ENM and day); every file name ends "
           "with _<ENM>_<YYYYMMDD>_<HHMMSS>, the time it was written, so runs of the same day do not mix:\n"),
-    ("li2", "01_lte_nr_termpoint_audit_*.xlsx      02_lte_nr_relation_audit_*.xlsx / .kmz (Google Earth)\n"
+    ("li2", "01_lte_nr_termpoint_audit_*.xlsx      02_lte_nr_relation_audit_*.xlsx\n"
             "MOP and rollback cmedit scripts, run in this order (rollbacks in the reverse order, 4 -> 1):\n"
             "  STEP 1  01_lte_nr_termpoint_create_mop_cmedit_*.txt   (CREATE and SET ipAddress)\n"
             "  STEP 2  02_lte_nr_relation_add_mop_cmedit_*.txt       (GUtranFreqRelation / ExternalGUtranCell if missing)\n"
@@ -141,28 +169,45 @@ INSTRUCTIONS = [
             "  STEP 4  01_lte_nr_termpoint_delete_mop_cmedit_*.txt\n"
             "Each MOP has its *_rollback_cmedit_*.txt; a deleted MO is recreated only with the attributes read "
             "from ENM.\n"),
-    ("h2", "3. Neighbor Fan\n"),
+    ("h2", "3. Graphical Audit\n"),
+    ("p", "2. Run Audit writes the reports and MOPs; 3. Graphical Audit shows one site on a map, with the relations its audit would keep, add or delete. Nothing is written to the network or to the reports.\n"),
     ("p", "A map of one site: its LTE fans (EPT position, azimuth and beam, length = Max85 of the propagation "
           "table; dashed 500 m when the cell has no Max85) colored by band, and the NR sites around it colored by "
           "tier (hops in the Delaunay triangulation of the NR sites, the same tiers as the audit; gray lines = "
           "Delaunay links). It reads the EPT and propagation of the workdir from the database (EPT cells on air, "
-          "not PLAN).\n"),
-    ("li", "•  Workdir and att_site (type part of the name to filter the list), Radius (km) of the map, "
+          "not PLAN; a site whose eNB / gNB is in ENM counts even if the EPT still has it as PLAN, as in the "
+          "audit).\n"),
+    ("li", "•  Workdir and att_site (type part of the name to filter the list; only sites with an LTE node in "
+           "the ENM, since a site of another vendor has nothing to audit), Radius (km) of the map, "
            "Map background (OpenStreetMap, cached in db\\tiles; white when offline).\n"),
-    ("li", "•  Neighbor NR fans (by tier): draws the fans of the NR cells of every neighbor site in its tier color "
-           "(azimuth and beam). Use NR max85 length: checked = real NR max85 (dashed 500 m when missing; long "
+    ("li", "•  The fans of the LTE cells of the site are drawn in their band color, and the fans of the NR cells "
+           "of every neighbor site in their tier color (azimuth and beam). Site max85 length: checked = real LTE "
+           "max85 (dashed 500 m when missing), unchecked = short, 8% of the map radius. NR max85 length: checked = real NR max85 (dashed 500 m when missing; long "
            "fans overlap a lot), unchecked = short markers, 8% of the map radius. The real max85 is always in "
            "Results -> Cells and in the KMZ.\n"),
     ("li", "•  Filters: Tiers (0-6), LTE bands (fans drawn), 5G bands (NR sites used for the tiers and NR fans).\n"),
-    ("li", "•  Fan Plot draws the map and fills Results in two tabs: Nodes (the selected site, then the NR "
+    ("li", "•  Fan Plot draws the map and fills Results in three tabs: Nodes (the selected site, then the NR "
            "sites with tier, distance and bearing) and Cells (LTE cells of the site, then the NR cells of the "
-           "neighbors with azimuth, beam and max85). Bearing = direction of the neighbor seen from the "
+           "neighbors with azimuth, beam and max85; target sites out of tiers at the end of Nodes), Relations. Bearing = direction of the neighbor seen from the "
            "selected site, degrees clockwise from north. Fan overlaps (counter): LTE cell = NR fans overlapping it, "
            "NR cell = LTE fans of the site overlapping it, node = sum of its cells; max85 fans with area > 0, as "
            "the audit (unknown when the cell has no max85). Clear Filter sets every filter back to All.\n"),
-    ("li", "•  Export XLSX / Export KMZ write output\\<workdir>\\neighbor_fan\\03_neighbor_fan_<site>_<YYYYMMDD>_<HHMMSS>; "
-           "the XLSX has the sheets Nodes, Cells and Settings; the KMZ opens in Google Earth (folders: LTE fans "
-           "by band, NR sites by tier, NR fans by tier, Delaunay links).\n"),
+    ("li", "•  LTE-NR Relations Current (by result) / LTE-NR Relations Missing: runs the Neighbor Relation audit "
+           "of 2. Run Audit on the LTE nodes of the site (same code, same Audit Rules: the box in this tab and in "
+           "2. Run Audit show the same values; a change in one shows in the other) and draws its relations. "
+           "Current (existing relations, by audit result): Current — Complete (black, the eNB has the "
+           "TermPointToGNB), Current — Missing TermPoint (blue), Current — To Be Deleted (red). Missing: "
+           "Missing — To Be Added (purple). With both unchecked the audit does not run. Only the LTE bands of "
+           "the Filters are drawn. Target "
+           "sites outside the drawn tiers are black points. Results -> Relations lists every relation with tier, "
+           "action, TermPoint, overlap and reason. The first plot of an ENM reads its data (about 40 s, once "
+           "per workdir); the next sites take a few seconds. A relation inside the same site (tier 0) has no "
+           "length on the map: see it in Results -> Relations.\n"),
+    ("li", "•  Export XLSX / Export KMZ write output\\<workdir>\\graphical_audit\\03_graphical_audit_<site>_<YYYYMMDD>_<HHMMSS>; "
+           "the XLSX has the sheets Nodes, Cells, Relations and Settings (with the Audit Rules used); the KMZ opens "
+           "in Google Earth (folders: Site LTE fans by band, NR sites by tier, NR fans by tier and site, target sites "
+           "out of tiers, Relations (audit) by kind, Delaunay links). In the KMZ a relation inside the same site "
+           "(tier 0) is a point.\n"),
     ("h2", "4. DB Status\n"),
     ("p", "One row per table loaded: Table, ENM, Workdir, Rows, Status (PARTIAL: nodes ENM did not read, in yellow) and Execution Date. "
           "Select Workdir filters the list (All = every workdir).\n"),
@@ -260,17 +305,18 @@ class MultiSelect(ttk.Menubutton):
     Escape. The button shows "All", "None", the chosen values or "N selected". get() -> tuple (list order).
     """
 
-    def __init__(self, master, items, selected=(), width=24):
+    def __init__(self, master, items, selected=(), width=24, share=None):
+        """share: another MultiSelect whose selection this one shows and changes (same values in two tabs)."""
         super().__init__(master, width=width)
-        self.items = list(items)
+        self.items = list(share.items if share else items)
         self.all_var = tk.BooleanVar(value=True)
-        self.vars = {}
+        self.vars = share.vars if share else {}
         self.popup = None
         self._syncing = False
         for v in self.items:
-            var = tk.BooleanVar(value=v in selected)
-            var.trace_add("write", lambda *_: self._item_changed())
-            self.vars[v] = var
+            if not share:
+                self.vars[v] = tk.BooleanVar(value=v in selected)
+            self.vars[v].trace_add("write", lambda *_: self._item_changed())
         self.bind("<Button-1>", self._toggle)
         self.bind("<Key-space>", self._toggle)
         self.bind("<Key-Down>", self._toggle)
@@ -690,36 +736,16 @@ class App:
         self.names_entry.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(2, 0))
         self._scope_toggle()
 
-        rules = ttk.LabelFrame(side, text="Audit Rules", padding=10)
-        rules.pack(fill=tk.X, pady=(10, 0))
-        rules.columnconfigure(1, weight=1)
+        # Audit Rules: one set of values, shown here and in 3. Graphical Audit (same variables)
         self.active = tk.BooleanVar(value=self.s.active_only_for_add)
-        self.lte_bands = MultiSelect(rules, LTE_BANDS, self.s.source_bands)
-        self.nr_bands = MultiSelect(rules, NR_BANDS, self.s.target_bands)
         self.zero_tier = tk.IntVar(value=self.s.zero_overlap_min_tier)
         self.del_tier = tk.IntVar(value=self.s.min_delete_tier)
         self.add_tier = tk.IntVar(value=self.s.max_add_tier)
         self.add_all_tier = tk.IntVar(value=self.s.max_add_all_tier)
-        # one rule per row: text on the left, its option on the right (aligned in column 1)
-        for row, (label, var, values) in enumerate([
-                ("LTE source bands", self.lte_bands, "widget"),
-                ("5G target bands", self.nr_bands, "widget"),
-                ("ADD only if both cells are UNLOCKED and ENABLED", self.active, None),
-                ("ADD ExtGNB, TermPoint, Relation", self.add_all_tier, ("tier <=", [0, 1, 2, 3, 4, 5])),
-                ("ADD ExtGNB, TermPoint, Relation (fan overlap)", self.add_tier, ("tier <=", [0, 1, 2, 3, 4, 5])),
-                ("DELETE ExtGNB, TermPoint, Relation (no fan overlap)", self.zero_tier, ("tier >=", [1, 2, 3, 4, 5, 6])),
-                ("DELETE ExtGNB, TermPoint, Relation", self.del_tier, ("tier >=", [4, 5, 6, 7, 8, 9, 10]))]):
-            ttk.Label(rules, text=label).grid(row=row, column=0, sticky="w", pady=2)
-            if values == "widget":
-                var.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=2)
-            elif values is None:
-                ttk.Checkbutton(rules, variable=var).grid(row=row, column=1, sticky="w", padx=(8, 0), pady=2)
-            else:                                # "tier <=" / "tier >=" right before the value
-                op, values = values
-                cell = ttk.Frame(rules)
-                cell.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=2)
-                ttk.Label(cell, text=op, width=7).pack(side=tk.LEFT)
-                ttk.Combobox(cell, textvariable=var, values=values, state="readonly", width=4).pack(side=tk.LEFT)
+        self.max_km = tk.StringVar(value=f"{self.s.max_site_km:g}")
+        self.lte_bands = self.nr_bands = None
+        rules = self._rules_box(side)
+        rules.pack(fill=tk.X, pady=(10, 0))
 
         # live preview of what the tier rules do (recomputed whenever a tier changes)
         prev = ttk.LabelFrame(side, text="What the audit will do", padding=10)
@@ -727,7 +753,7 @@ class App:
         self.rule_grid = tk.Frame(prev, bg=C_BORDER)     # 1px gaps between cells show as grid lines
         self.rule_grid.pack(anchor="w")
         self.rule_warn = ttk.Label(prev, foreground="#c62828", wraplength=420, justify="left")
-        for v in (self.add_all_tier, self.add_tier, self.zero_tier, self.del_tier):
+        for v in (self.add_all_tier, self.add_tier, self.zero_tier, self.del_tier, self.max_km):
             v.trace_add("write", lambda *_: self._rule_preview())
         self._rule_preview()
 
@@ -748,6 +774,59 @@ class App:
         frame.pack(fill=tk.BOTH, expand=True)
         self.res_tree.bind("<Double-1>", self._open_result)
         self.run_outs = {}                      # tree item -> file or folder to open
+
+    def _rules_box(self, parent):
+        """The Audit Rules box. The first call (2. Run Audit) creates the band selectors; later calls
+        (3. Graphical Audit) build widgets on the same variables, so a change in one tab shows in both."""
+        rules = ttk.LabelFrame(parent, text="Audit Rules", padding=10)
+        rules.columnconfigure(1, weight=1)
+        lte = MultiSelect(rules, LTE_BANDS, self.s.source_bands, share=self.lte_bands)
+        nr = MultiSelect(rules, NR_BANDS, self.s.target_bands, share=self.nr_bands)
+        if self.lte_bands is None:
+            self.lte_bands, self.nr_bands = lte, nr
+        # one rule per row: text on the left, its option on the right (aligned in column 1)
+        for row, (label, var, values) in enumerate([
+                ("LTE source bands", lte, "widget"),
+                ("5G target bands", nr, "widget"),
+                ("ADD only if both cells are UNLOCKED and ENABLED", self.active, None),
+                ("ADD ExtGNB, TermPoint, Relation", self.add_all_tier, ("tier <=", [0, 1, 2, 3, 4, 5])),
+                ("ADD ExtGNB, TermPoint, Relation (fan overlap)", self.add_tier, ("tier <=", [0, 1, 2, 3, 4, 5])),
+                ("DELETE ExtGNB, TermPoint, Relation (no fan overlap)", self.zero_tier, ("tier >=", [1, 2, 3, 4, 5, 6])),
+                ("DELETE ExtGNB, TermPoint, Relation", self.del_tier, ("tier >=", [4, 5, 6, 7, 8, 9, 10])),
+                ("Max Site distance (Km)", self.max_km, "km")]):
+            ttk.Label(rules, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            if values == "km":                   # editable; applied after the tier rules
+                cell = ttk.Frame(rules)
+                cell.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=2)
+                ttk.Label(cell, text="<=", width=7).pack(side=tk.LEFT)
+                ttk.Spinbox(cell, textvariable=var, from_=1, to=500, increment=5, width=5).pack(side=tk.LEFT)
+            elif values == "widget":
+                var.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=2)
+            elif values is None:
+                ttk.Checkbutton(rules, variable=var).grid(row=row, column=1, sticky="w", padx=(8, 0), pady=2)
+            else:                                # "tier <=" / "tier >=" right before the value
+                op, values = values
+                cell = ttk.Frame(rules)
+                cell.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=2)
+                ttk.Label(cell, text=op, width=7).pack(side=tk.LEFT)
+                ttk.Combobox(cell, textvariable=var, values=values, state="readonly", width=4).pack(side=tk.LEFT)
+        return rules
+
+    def _apply_rules(self, s):
+        """Audit Rules of the GUI into Settings s (shared by 2. Run Audit and 3. Graphical Audit)."""
+        s.active_only_for_add = self.active.get()
+        s.zero_overlap_min_tier, s.min_delete_tier = self.zero_tier.get(), self.del_tier.get()
+        s.max_add_tier, s.max_add_all_tier = self.add_tier.get(), self.add_all_tier.get()
+        s.source_bands, s.target_bands = self.lte_bands.get(), self.nr_bands.get()
+        s.max_site_km = self._max_km()
+        return s
+
+    def _max_km(self):
+        """Max Site distance (Km) typed in Audit Rules; 0 (refused by rule_problems) when not a number."""
+        try:
+            return float(self.max_km.get().replace(",", "."))
+        except ValueError:
+            return 0.0
 
     def _rule_preview(self):
         """Table of the action per tier for existing / missing relations, with and without fan overlap
@@ -774,7 +853,11 @@ class App:
         for w in g.winfo_children():
             w.destroy()
         head = dict(bg="#e4e9ef", fg=C_TEXT, font=(UI_FONT, 9, "bold"), padx=8, pady=2)
-        tk.Label(g, text="Tier", **head).grid(row=0, column=0, rowspan=2, sticky="nsew", padx=1, pady=1)
+        tk.Label(g, text="Tier", **head).grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
+        # Max Site distance filters every tier: the table holds for sites within it (farther: no ADD, DELETE)
+        km = self._max_km()
+        tk.Label(g, text=f"≤ {km:g} km" if km > 0 else "≤ ? km", **dict(head, font=(UI_FONT, 9))).grid(
+            row=1, column=0, sticky="nsew", padx=1, pady=1)
         for c, text in ((1, "Exists"), (3, "Missing")):
             tk.Label(g, text=text, **head).grid(row=0, column=c, columnspan=2, sticky="nsew", padx=1, pady=1)
         for c in range(4):
@@ -813,11 +896,7 @@ class App:
         s.part1, s.part2 = self.p1.get(), self.p2.get()
         node_list = self.scope.get() == "Node list"
         s.scope, s.scope_names = ("nodes", self.names.get()) if node_list else ("all", "")
-        s.active_only_for_add = self.active.get()
-        s.zero_overlap_min_tier, s.min_delete_tier = self.zero_tier.get(), self.del_tier.get()
-        s.max_add_tier, s.max_add_all_tier = self.add_tier.get(), self.add_all_tier.get()
-        s.source_bands, s.target_bands = self.lte_bands.get(), self.nr_bands.get()
-        return s
+        return self._apply_rules(s)
 
     def start(self):
         if not self.workdir_ok():
@@ -913,10 +992,10 @@ class App:
         if target and Path(target).exists():
             os.startfile(str(target))
 
-    # ---- Tab 3: Neighbor Fan
+    # ---- Tab 3: Graphical Audit
     def _tab_fan(self):
         tab = ttk.Frame(self.nb, padding=10)
-        self.nb.add(tab, text="  3. Neighbor Fan  ")
+        self.nb.add(tab, text="  3. Graphical Audit  ")
         side = ttk.Frame(tab)
         side.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         main = ttk.Frame(tab)
@@ -937,16 +1016,20 @@ class App:
         self.fan_radius = tk.DoubleVar(value=3.0)
         ttk.Spinbox(box, from_=0.5, to=50, increment=0.5, textvariable=self.fan_radius, width=6).grid(
             row=2, column=1, sticky="w", padx=(8, 0), pady=2)
+        # the site LTE fans and the neighbor NR fans are always drawn; only their length is optional
         self.fan_basemap = tk.BooleanVar(value=True)
-        ttk.Checkbutton(box, text="Map background (OpenStreetMap)", variable=self.fan_basemap).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.fan_nr_fans = tk.BooleanVar(value=True)
-        ttk.Checkbutton(box, text="Neighbor NR fans (by tier)", variable=self.fan_nr_fans,
-                        command=self._fan_nr_toggle).grid(row=4, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        self.fan_lte_max85 = tk.BooleanVar(value=True)
         self.fan_nr_max85 = tk.BooleanVar(value=False)
-        self.fan_nr_max85_cb = ttk.Checkbutton(box, text="Use NR max85 length (else 8% of radius)",
-                                               variable=self.fan_nr_max85)
-        self.fan_nr_max85_cb.grid(row=5, column=0, columnspan=2, sticky="w", padx=(20, 0), pady=(2, 0))
+        self.fan_rel_current = tk.BooleanVar(value=True)
+        self.fan_rel_missing = tk.BooleanVar(value=True)
+        options = (("Map background (OpenStreetMap)", self.fan_basemap),
+                   ("Site max85 length (or 8% of radius)", self.fan_lte_max85),
+                   ("NR max85 length (or 8% of radius)", self.fan_nr_max85),
+                   ("LTE-NR Relations Current (by result)", self.fan_rel_current),
+                   ("LTE-NR Relations Missing", self.fan_rel_missing))
+        for i, (text, var) in enumerate(options):
+            ttk.Checkbutton(box, text=text, variable=var).grid(
+                row=3 + i, column=0, columnspan=2, sticky="w", pady=(4 if i == 0 else 2, 0))
 
         filt = ttk.LabelFrame(side, text="Filters", padding=10)
         filt.pack(fill=tk.X, pady=(10, 0))
@@ -959,6 +1042,7 @@ class App:
                                           ("5G bands", self.fan_nr))):
             ttk.Label(filt, text=label).grid(row=row, column=0, sticky="w", pady=2)
             w.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self._rules_box(side).pack(fill=tk.X, pady=(10, 0))     # same values as in 2. Run Audit
 
         b = ttk.Button(side, text="Fan Plot", style="Accent.TButton", command=self.fan_plot)
         b.pack(fill=tk.X, pady=(12, 2))
@@ -986,8 +1070,8 @@ class App:
         body.add(res, weight=2)
         self.fan_res_nb = ttk.Notebook(res)
         self.fan_res_nb.pack(fill=tk.BOTH, expand=True)
-        self.fan_tables = {}          # "Nodes" / "Cells" -> Treeview
-        for name in ("Nodes", "Cells"):
+        self.fan_tables = {}          # "Nodes" / "Cells" / "Relations" -> Treeview
+        for name in ("Nodes", "Cells", "Relations"):
             page = ttk.Frame(self.fan_res_nb)
             self.fan_res_nb.add(page, text=f" {name} ")
             tv = ttk.Treeview(page, show="headings", height=8)
@@ -1003,6 +1087,8 @@ class App:
         self.fan_data = None          # lne_fanview.FanData of (workdir, loaded_at)
         self.fan_key = None
         self.fan_view = None
+        self.fan_audit = None         # lne_siteaudit.SiteAudit of fan_audit_key (ENM inventories in memory)
+        self.fan_audit_key = None
 
     def _fan_key_now(self):
         wd = self.workdir.get().strip()
@@ -1029,10 +1115,10 @@ class App:
         if not key[1]:
             wds = lne_db.workdirs(DB_PATH)
             if not wds:
-                self.log(f"Neighbor Fan: no workdir loaded in {DB_PATH} -> run 1. Load Data -> Process")
+                self.log(f"Graphical Audit: no workdir loaded in {DB_PATH} -> run 1. Load Data -> Process")
                 return
             # today's workdir is not loaded: use the last one loaded
-            self.log(f"Neighbor Fan: workdir '{key[0] or '-'}' not in the database, using {wds[0]}")
+            self.log(f"Graphical Audit: workdir '{key[0] or '-'}' not in the database, using {wds[0]}")
             self.workdir.set(wds[0])
             key = self._fan_key_now()
         self.run_bg("Loading sites (EPT)", lambda: self._fan_data_job(key), lambda r: self._fan_set_data(*r))
@@ -1052,13 +1138,37 @@ class App:
         except (tk.TclError, ValueError):
             radius = 3.0
         basemap = self.fan_basemap.get()
-        nr_fans = self.fan_nr_fans.get()
         nr_max85 = self.fan_nr_max85.get()
+        lte_max85 = self.fan_lte_max85.get()
+        rel_kinds = ([k for k in lne_fanview.RELATION_LINES if k != "add"] if self.fan_rel_current.get() else []) \
+            + (["add"] if self.fan_rel_missing.get() else [])
         key = self._fan_key_now()
+        max_km = self._max_km()                    # Audit Rules: limits the tier sites of the map
+        if not max_km > 0:
+            messagebox.showwarning(APP_TITLE, "Audit Rules: Max Site distance (Km) must be a number greater than 0.")
+            return
+        rules = None
+        if rel_kinds:
+            rules = self._apply_rules(Settings())
+            if rules.rule_problems():
+                messagebox.showwarning(APP_TITLE, "Contradictory Audit Rules:\n\n" + "\n\n".join(rules.rule_problems()))
+                return
+            if not (rules.source_bands and rules.target_bands):
+                messagebox.showwarning(APP_TITLE, "Audit Rules: select at least one LTE source band and one "
+                                                  "5G target band (or uncheck the LTE-NR Relations).")
+                return
 
         def work():
             data, key2 = self._fan_data_job(key)
-            view = data.build(site, lte, nr, tiers, radius, nr_fans=nr_fans, nr_max85=nr_max85)
+            relations, audit = None, None
+            if rules is not None:
+                if self.fan_audit_key != key2:
+                    self.fan_audit, self.fan_audit_key = lne_siteaudit.SiteAudit(DB_PATH, key2[0], self.log), key2
+                rule_rows = [(r["Setting"], r["Value"]) for r in rules.as_rows() if r["Setting"] in RULE_SETTINGS]
+                enm, nodes, relations, note = self.fan_audit.relations(site, rules)
+                audit = {"enm": enm, "nodes": nodes, "note": note, "rules": rule_rows}
+            view = data.build(site, lte, nr, tiers, radius, nr_max85=nr_max85, relations=relations,
+                              audit=audit, lte_max85=lte_max85, rel_kinds=rel_kinds or None, max_site_km=max_km)
             bm = lne_basemap.fetch_basemap(*view.extent()) if basemap else None
             return data, key2, view, bm
 
@@ -1068,16 +1178,26 @@ class App:
             self.fan_view = view
             lne_fanview.draw(self.fan_fig, view, bm)
             self.fan_canvas.draw()
-            nodes, cells = view.nodes_table(), view.cells_table()
+            nodes, cells, rels = view.nodes_table(), view.cells_table(), view.relations_table()
             self._fan_fill_table("Nodes", nodes)
             self._fan_fill_table("Cells", cells)
+            self._fan_fill_table("Relations", rels)
             self.fan_res_nb.tab(0, text=f" Nodes ({len(nodes)}) ")
             self.fan_res_nb.tab(1, text=f" Cells ({len(cells)}) ")
-            self.log(f"Neighbor Fan {site}: {len(view.fans)} LTE fans, {len(view.sites)} NR sites, "
+            self.fan_res_nb.tab(2, text=f" Relations ({len(rels)}) " if view.relations is not None
+                                else " Relations (off) ")
+            a = view.audit
+            rel_text = ""
+            if view.relations is not None:
+                counts = ", ".join(f"{lne_fanview.RELATION_LINES[k][0]} {n}" for k, n in
+                                   pd.Series([r["kind"] for r in view.relations], dtype=object).value_counts().items())
+                rel_text = (f" · relations (ENM {a.get('enm') or '-'}): {counts or 'none'}"
+                            + (f" — {a['note']}" if a.get("note") else ""))
+            self.log(f"Graphical Audit {site}: {len(view.fans)} LTE fans, {len(view.sites)} NR sites, "
                      f"{len(view.nr_fans)} NR fans "
-                     f"(tiers {', '.join(map(str, tiers))})" + ("" if bm is not None or not basemap else
+                     f"(tiers {', '.join(map(str, tiers))})" + rel_text + ("" if bm is not None or not basemap else
                                                                   " · map background not available (offline)"))
-        self.run_bg(f"Neighbor Fan {site}", work, done)
+        self.run_bg(f"Graphical Audit {site}", work, done)
 
     def _fan_fill_table(self, name, df):
         t = self.fan_tables[name]
@@ -1099,27 +1219,26 @@ class App:
             w.select_all()
         self.fan_radius.set(3.0)
         self.fan_basemap.set(True)
-        self.fan_nr_fans.set(True)
         self.fan_nr_max85.set(False)
-        self._fan_nr_toggle()
-
-    def _fan_nr_toggle(self):
-        """'Use NR max85 length' only applies when the neighbor NR fans are drawn."""
-        self.fan_nr_max85_cb.state(["!disabled"] if self.fan_nr_fans.get() else ["disabled"])
+        self.fan_lte_max85.set(True)
+        self.fan_rel_current.set(True)
+        self.fan_rel_missing.set(True)
 
     def _fan_out(self, ext):
         if self.fan_view is None:
             messagebox.showwarning(APP_TITLE, "Press Fan Plot first.")
             return None
-        folder = Path(OUTPUT_ROOT) / self.fan_view.filters["workdir"] / "neighbor_fan"
+        folder = Path(OUTPUT_ROOT) / self.fan_view.filters["workdir"] / "graphical_audit"
         folder.mkdir(parents=True, exist_ok=True)
-        return folder / f"03_neighbor_fan_{self.fan_view.site}_{datetime.now():%Y%m%d_%H%M%S}.{ext}"
+        return folder / f"03_graphical_audit_{self.fan_view.site}_{datetime.now():%Y%m%d_%H%M%S}.{ext}"
 
     def fan_export_xlsx(self):
         path = self._fan_out("xlsx")
         if path:
-            lne_report.write_excel(path, {"Nodes": self.fan_view.nodes_table(),
-                                            "Cells": self.fan_view.cells_table(), "Settings": self.fan_view.settings_rows()})
+            sheets = {"Nodes": self.fan_view.nodes_table(), "Cells": self.fan_view.cells_table()}
+            if self.fan_view.relations is not None:
+                sheets["Relations"] = self.fan_view.relations_table()
+            lne_report.write_excel(path, {**sheets, "Settings": self.fan_view.settings_rows()})
             self.log(f"Exported {path}")
             os.startfile(str(path.parent))
 
@@ -1251,6 +1370,9 @@ class App:
         text.tag_configure("p", spacing3=4)
         text.tag_configure("li", lmargin1=18, lmargin2=34, spacing3=2)
         text.tag_configure("li2", lmargin1=40, lmargin2=40, font=("Consolas", 10), spacing3=6)
+        # cmedit commands: monospace, one per line (wrapping is display only: a copied line stays whole)
+        text.tag_configure("cmd", lmargin1=18, lmargin2=40, font=("Consolas", 9), wrap="char",
+                           background="#f3f5f8", spacing1=2, spacing3=2)
         for tag, content in INSTRUCTIONS:
             text.insert(tk.END, content, tag)
         text.configure(state="disabled")
